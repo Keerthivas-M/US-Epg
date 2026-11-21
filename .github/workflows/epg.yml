@@ -1,0 +1,58 @@
+
+{
+ "name": "Update US EPG",
+ "on": {
+  "schedule": [
+   {
+    "cron": "0 21 * * *"
+   }
+  ],
+  "workflow_dispatch": {}
+ },
+ "permissions": {
+  "contents": "write"
+ },
+ "jobs": {
+  "grab": {
+   "runs-on": "ubuntu-latest",
+   "timeout-minutes": 240,
+   "steps": [
+    {
+     "uses": "actions/checkout@v4"
+    },
+    {
+     "uses": "actions/setup-node@v4",
+     "with": {
+      "node-version": 22
+     }
+    },
+    {
+     "name": "Download iptv-org EPG tool",
+     "run": "git clone --depth 1 https://github.com/iptv-org/epg.git epg-tool"
+    },
+    {
+     "name": "Install tool",
+     "working-directory": "epg-tool",
+     "run": "npm install"
+    },
+    {
+     "name": "Download US playlist",
+     "run": "curl -sSL -o us.m3u https://iptv-org.github.io/iptv/countries/us.m3u"
+    },
+    {
+     "name": "Pick guide sources for playlist channels",
+     "run": "cat > build_channels.py <<'PYEOF'\n\"\"\"Build a channels.xml for iptv-org/epg containing only channels in a playlist.\n\nUsage: python3 build_channels.py <playlist.m3u> <epg-tool-dir> <output.xml>\n\"\"\"\nimport glob\nimport os\nimport re\nimport sys\nfrom xml.sax.saxutils import quoteattr\n\n# Sources tried in order; the first one that has a channel wins.\nSOURCES = [\n    \"pluto.tv/pluto.tv_us.channels.xml\",\n    \"plex.tv/plex.tv_us.channels.xml\",\n    \"i.mjh.nz/i.mjh.nz_samsung.channels.xml\",\n    \"i.mjh.nz/i.mjh.nz_roku.channels.xml\",\n    \"xumo.tv/xumo.tv.channels.xml\",\n    \"distro.tv/distro.tv.channels.xml\",\n    \"tvguide.com/tvguide.com.channels.xml\",\n    \"directv.com/directv.com.channels.xml\",\n    \"tvpassport.com/tvpassport.com.channels.xml\",\n]\n\nCH_RE = re.compile(r\"<channel\\s+([^>]*)>(.*?)</channel>\", re.S)\nATTR_RE = re.compile(r'(\\w+)=\"([^\"]*)\"')\n\nplaylist, tool_dir, out_path = sys.argv[1:4]\n\nwanted = []  # playlist tvg-ids, in order\nfor tid in re.findall(r'tvg-id=\"([^\"]+)\"', open(playlist, encoding=\"utf-8\").read()):\n    if tid not in wanted:\n        wanted.append(tid)\nby_base = {}\nfor tid in wanted:\n    by_base.setdefault(tid.split(\"@\")[0].lower(), []).append(tid)\n\nchosen = {}  # playlist tvg-id -> (attrs, name)\nfor rel in SOURCES:\n    for path in glob.glob(os.path.join(tool_dir, \"sites\", rel)):\n        for attrs_s, name in CH_RE.findall(open(path, encoding=\"utf-8\").read()):\n            a = dict(ATTR_RE.findall(attrs_s))\n            xid = a.get(\"xmltv_id\", \"\")\n            if not xid:\n                continue\n            for tid in by_base.get(xid.split(\"@\")[0].lower(), []):\n                if tid not in chosen:\n                    chosen[tid] = (a, name)\n\nlines = ['<?xml version=\"1.0\" encoding=\"UTF-8\"?>', \"<channels>\"]\nfor tid in wanted:\n    if tid not in chosen:\n        continue\n    a, name = chosen[tid]\n    lines.append(\n        \"  <channel site=%s site_id=%s lang=%s xmltv_id=%s>%s</channel>\"\n        % (quoteattr(a[\"site\"]), quoteattr(a[\"site_id\"]), quoteattr(a.get(\"lang\", \"en\")),\n           quoteattr(tid), name.strip())\n    )\nlines.append(\"</channels>\")\nopen(out_path, \"w\", encoding=\"utf-8\").write(\"\\n\".join(lines) + \"\\n\")\n\nsites = {}\nfor a, _ in chosen.values():\n    sites[a[\"site\"]] = sites.get(a[\"site\"], 0) + 1\nprint(f\"playlist channels: {len(wanted)}, with a guide source: {len(chosen)}\")\nfor s, n in sorted(sites.items(), key=lambda x: -x[1]):\n    print(f\"  {s}: {n}\")\nPYEOF\npython3 build_channels.py us.m3u epg-tool epg-tool/us.channels.xml\n"
+    },
+    {
+     "name": "Grab US guide",
+     "working-directory": "epg-tool",
+     "run": "npm run grab --- --channels=us.channels.xml --days=3 --maxConnections=5 --output=${{ github.workspace }}/guide.xml --gzip=${{ github.workspace }}/guide.xml.gz\n"
+    },
+    {
+     "name": "Save guide (keeps repo small by replacing old history)",
+     "run": "rm -rf epg-tool guide.xml us.m3u build_channels.py\ngit config user.name \"github-actions\"\ngit config user.email \"github-actions@users.noreply.github.com\"\ngit checkout --orphan fresh\ngit add -A\ngit commit -m \"EPG update $(date -u +%F)\"\ngit push -f origin fresh:main\n"
+    }
+   ]
+  }
+ }
+}
